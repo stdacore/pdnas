@@ -22,7 +22,8 @@ class MixedOp(nn.Module):
                     op = nn.Sequential(op, nn.BatchNorm2d(C, affine=False))
                 if isinstance(op, Identity) and p > 0:
                     op = nn.Sequential(op, nn.Dropout(self.p))
-                self.m_ops.append(op)
+                # self.m_ops.append(op)
+                self.m_ops.add_module('op%d'%i, op)
                 
     def update_p(self):
         for op in self.m_ops:

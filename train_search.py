@@ -46,8 +46,10 @@ parser.add_argument('--add_width', action='append', default=['0'], help='add cha
 parser.add_argument('--add_layers', action='append', default=['0'], help='add layers')
 parser.add_argument('--cifar100', action='store_true', default=False, help='search with cifar100 dataset')
 parser.add_argument('--nodes', type=int, default=4, help='num of nodes in a cells')
+parser.add_argument('--gpu', type=str, default='0', help='gpu')
 
 args = parser.parse_args()
+os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
 args.save = '{}search-{}-{}'.format(args.save, args.note, time.strftime("%Y%m%d-%H%M%S"))
 utils.create_exp_dir(args.save, scripts_to_save=glob.glob('*.py'))
@@ -114,7 +116,7 @@ def main():
     switches_reduce = copy.deepcopy(switches)
     # To be moved to args
     num_to_keep = [5, 3, 1]
-    num_to_drop = [3, 2, 2]
+    num_to_drop = [2, 2, 2]
     if len(args.add_width) == 3:
         add_width = args.add_width
     else:
@@ -140,6 +142,12 @@ def main():
                         steps=args.nodes, multiplier=args.nodes, switches_normal=switches_normal, switches_reduce=switches_reduce, p=float(drop_rate[sp]))
         model = nn.DataParallel(model)
         # print(model)
+
+        if sp==0:
+            utils.save(model.module.cells, os.path.join(args.save, 'cell_weights.pt')) # keep initial weights
+        else:
+            utils.load(model.module.cells, os.path.join(args.save, 'cell_weights.pt')) # strict=False
+
         model = model.cuda()
         logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
         network_params = []
@@ -318,15 +326,15 @@ def train(train_queue, valid_queue, model, network_params, criterion, optimizer,
             optimizer_a.step()
 
         optimizer.zero_grad()
-        optimizer_a.zero_grad()
+        # optimizer_a.zero_grad()
         logits = model(input)
-        loss = criterion(logits, target) + sum(sum(F.softmax(model.module.alphas_normal_derive, dim=-1)**0.5))*0.1
+        loss = criterion(logits, target) #+ sum(sum(F.softmax(model.module.alphas_normal_derive, dim=-1)**0.5))*0.1
 
         loss.backward()
         nn.utils.clip_grad_norm_(network_params, args.grad_clip)
         optimizer.step()
-        if train_arch:
-            optimizer_a.step()
+        # if train_arch:
+        #     optimizer_a.step()
 
         prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
         objs.update(loss.data.item(), n)
