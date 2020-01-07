@@ -8,6 +8,7 @@ import utils
 import logging
 import argparse
 import random
+import re
 import torch.nn as nn
 import torch.utils
 import torch.nn.functional as F
@@ -80,13 +81,14 @@ def main():
     logging.info("args = %s", args)
     #  prepare dataset
     if args.cifar100:
-        train_transform, valid_transform = utils._data_transforms_cifar100(args)
+        train_transform, test_transform = utils._data_transforms_cifar100(args)
     else:
-        train_transform, valid_transform = utils._data_transforms_cifar10(args)
+        train_transform, test_transform = utils._data_transforms_cifar10(args)
     if args.cifar100:
         train_data = dset.CIFAR100(root=args.tmp_data_dir, train=True, download=True, transform=train_transform)
     else:
         train_data = dset.CIFAR10(root=args.tmp_data_dir, train=True, download=True, transform=train_transform)
+        test_data = dset.CIFAR10(root=args.tmp_data_dir, train=False, download=True, transform=test_transform)
 
     num_train = len(train_data)
     indices = list(range(num_train))
@@ -101,6 +103,9 @@ def main():
         train_data, batch_size=args.batch_size,
         sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
         pin_memory=True, num_workers=args.workers)
+
+    test_queue = torch.utils.data.DataLoader(
+        test_data, batch_size=args.batch_size, pin_memory=True, num_workers=args.workers)
     
     # build Network
     criterion = nn.CrossEntropyLoss()
@@ -110,13 +115,15 @@ def main():
     switches = []
     for i in range(path_num):
         switches.append([True for j in range(len(PRIMITIVES))])
+
     # for i in range(path_num):
     #     switches[i][0]=False # switch off zero operator
+    
     switches_normal = copy.deepcopy(switches)
     switches_reduce = copy.deepcopy(switches)
     # To be moved to args
     num_to_keep = [5, 3, 1]
-    num_to_drop = [2, 2, 2]
+    num_to_drop = [3, 2, 2]
     if len(args.add_width) == 3:
         add_width = args.add_width
     else:
@@ -143,10 +150,25 @@ def main():
         model = nn.DataParallel(model)
         # print(model)
 
-        if sp==0:
-            utils.save(model.module.cells, os.path.join(args.save, 'cell_weights.pt')) # keep initial weights
-        else:
-            utils.load(model.module.cells, os.path.join(args.save, 'cell_weights.pt')) # strict=False
+        # if sp==0:
+        #     utils.save(model, os.path.join(args.save, 'cell_weights.pt')) # keep initial weights
+        # else:
+        #     utils.load(model.module.cells, os.path.join(args.save, 'cell_weights.pt')) # strict=False
+
+        
+        # print('copying weight....')
+        # state_dict = torch.load(os.path.join(args.save, 'cell_weights.pt'))
+        # for key in state_dict.keys():
+        #     print(key)
+        # for key in state_dict.keys():
+        #     if 'm_ops' in key and 'op0' not in key:
+        #         s = re.split('op\d', key)
+        #         copy_key = s[0]+'op0'+s[1]
+        #         state_dict[key] = state_dict[copy_key]
+        #         print(key)
+        # model.load_state_dict(state_dict)
+        # print('done!')
+        
 
         model = model.cuda()
         logging.info("param size = %fMB", utils.count_parameters_in_MB(model))
@@ -170,12 +192,12 @@ def main():
         optimizer_a = torch.optim.Adam(arch_params,
                     lr=args.arch_learning_rate, betas=(0.5, 0.999), weight_decay=args.arch_weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, float(args.epochs), eta_min=args.learning_rate)
+                optimizer, float(args.epochs), eta_min=args.learning_rate_min)
         sm_dim = -1
         epochs = args.epochs
         eps_no_arch = eps_no_archs[sp]
         scale_factor = 0.2
-        for epoch in range(epochs):
+        for epoch in range(epochs):#epochs
             scheduler.step()
             lr = scheduler.get_lr()[0]#args.learning_rate#
             logging.info('Epoch: %d lr: %e', epoch, lr)
@@ -185,10 +207,13 @@ def main():
                 model.module.p = float(drop_rate[sp]) * (epochs - epoch - 1) / epochs
                 model.module.update_p()
                 train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=False)
-            else:
+            elif epoch < epochs:
                 model.module.p = float(drop_rate[sp]) * np.exp(-(epoch - eps_no_arch) * scale_factor) 
                 model.module.update_p()                
                 train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True)
+            else:  
+                train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True, train_weight=False)
+
             logging.info('Train_acc %f', train_acc)
             epoch_duration = time.time() - epoch_start
             logging.info('Epoch time: %ds', epoch_duration)
@@ -196,6 +221,9 @@ def main():
             # if epochs - epoch < 5:
             valid_acc, valid_obj = infer(valid_queue, model, criterion)
             logging.info('Valid_acc %f', valid_acc)
+            test_acc, test_obj = infer(test_queue, model, criterion)
+            logging.info('Test_acc %f', test_acc)
+
         utils.save(model, os.path.join(args.save, 'weights.pt'))
         print('------Dropping %d paths------' % num_to_drop[sp])
         # Save switches info for s-c refinement. 
@@ -295,7 +323,7 @@ def main():
                 genotype = parse_network(switches_normal, switches_reduce, steps=args.nodes)
                 logging.info(genotype)              
 
-def train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True):
+def train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True, train_weight=True):
     objs = utils.AvgrageMeter()
     top1 = utils.AvgrageMeter()
     top5 = utils.AvgrageMeter()
@@ -325,24 +353,25 @@ def train(train_queue, valid_queue, model, network_params, criterion, optimizer,
             nn.utils.clip_grad_norm_(model.module.arch_parameters(), args.grad_clip)
             optimizer_a.step()
 
-        optimizer.zero_grad()
-        # optimizer_a.zero_grad()
-        logits = model(input)
-        loss = criterion(logits, target) #+ sum(sum(F.softmax(model.module.alphas_normal_derive, dim=-1)**0.5))*0.1
+        if train_weight:
+            optimizer.zero_grad()
+            # optimizer_a.zero_grad()
+            logits = model(input)
+            loss = criterion(logits, target) #+ sum(sum(F.softmax(model.module.alphas_normal_derive, dim=-1)**0.5))*0.1
 
-        loss.backward()
-        nn.utils.clip_grad_norm_(network_params, args.grad_clip)
-        optimizer.step()
-        # if train_arch:
-        #     optimizer_a.step()
+            loss.backward()
+            nn.utils.clip_grad_norm_(network_params, args.grad_clip)
+            optimizer.step()
+            # if train_arch:
+            #     optimizer_a.step()
 
-        prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-        objs.update(loss.data.item(), n)
-        top1.update(prec1.data.item(), n)
-        top5.update(prec5.data.item(), n)
+            prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+            objs.update(loss.data.item(), n)
+            top1.update(prec1.data.item(), n)
+            top5.update(prec5.data.item(), n)
 
-        if step % args.report_freq == 0:
-            logging.info('TRAIN Step: %03d Objs: %e R1: %f R5: %f', step, objs.avg, top1.avg, top5.avg)
+            if step % args.report_freq == 0:
+                logging.info('TRAIN Step: %03d Objs: %e R1: %f R5: %f', step, objs.avg, top1.avg, top5.avg)
     
     arch_param = model.module.arch_parameters()
     # print(arch_param[0])

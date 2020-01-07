@@ -177,13 +177,12 @@ class Network(nn.Module):
     def _initialize_alphas(self):
         k = sum(1 for i in range(self._steps) for n in range(2+i))
         num_ops = self.switch_on
-        # op_weights = torch.FloatTensor(np.array([-5, -1.386, -1.386, 1, -1.386, -1.386]))
-        self.alphas_normal = torch.FloatTensor(0.5*np.ones((k, num_ops)))#*op_weights
+        self.alphas_normal = torch.FloatTensor(0.001*np.ones((k, num_ops)))#*op_weights
         self.alphas_normal = self.alphas_normal.cuda()
         # self.alphas_normal = nn.Parameter(torch.FloatTensor(1e-3*np.random.randn(k, num_ops)))
-        self.alphas_reduce = nn.Parameter(torch.FloatTensor(0.5*np.ones((k, num_ops))))
+        self.alphas_reduce = nn.Parameter(torch.FloatTensor(0.001*np.ones((k, num_ops))))
         self.alphas_dependency = nn.ModuleList()
-        self.alphas_normal_source = nn.Parameter(torch.FloatTensor(0.5*np.ones((k, num_ops))))#*op_weights)
+        self.alphas_normal_source = nn.Parameter(torch.FloatTensor(0.001*np.ones((k, num_ops))))#*op_weights)
 
         for i in range(self._steps-1):
             for j in range((i+2)*(self._steps-1-i)):

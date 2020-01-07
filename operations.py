@@ -74,18 +74,18 @@ class Identity(nn.Module):
   def forward(self, x):
     return x
 
-'''
-class Zero(nn.Module):
 
-  def __init__(self, stride):
-    super(Zero, self).__init__()
-    self.stride = stride
+# class Zero(nn.Module):
 
-  def forward(self, x):
-    if self.stride == 1:
-      return x.mul(0.)
-    return x[:,:,::self.stride,::self.stride].mul(0.)
-'''
+#   def __init__(self, stride):
+#     super(Zero, self).__init__()
+#     self.stride = stride
+
+#   def forward(self, x):
+#     if self.stride == 1:
+#       return x.mul(0.)
+#     return x[:,:,::self.stride,::self.stride].mul(0.)
+
 
 class Zero(nn.Module):
 
