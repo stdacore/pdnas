@@ -63,13 +63,14 @@ class Cell(nn.Module):
             op.p = self.p
             op.update_p()
 
-    def forward(self, s0, s1, weights):
+    def forward(self, s0, s1, weights, weights2):
         s0 = self.preprocess0(s0)
         s1 = self.preprocess1(s1)
         states = [s0, s1]
         offset = 0
         for i in range(self._steps):
-            s = sum(self.cell_ops[offset+j](h, weights[offset+j]) for j, h in enumerate(states))
+            s = sum(weights2[offset+j]*self.cell_ops[offset+j](h, weights[offset+j]) for j, h in enumerate(states))
+            # s = sum(self.cell_ops[offset+j](h, weights[offset+j]) for j, h in enumerate(states))
             offset += len(states)
             states.append(s)
 
@@ -155,12 +156,36 @@ class Network(nn.Module):
                     weights = F.softmax(self.alphas_reduce, dim=0)
                 else:
                     weights = F.softmax(self.alphas_reduce, dim=-1)
+
+                # n = 3
+                # start = 2
+                # weights2 = F.softmax(self.alphas_betas_reduce[0:2], dim=-1)
+                # for i in range(self._steps-1):
+                #     end = start + n
+                #     tw2 = F.softmax(self.alphas_betas_reduce[start:end], dim=-1)
+                #     start = end
+                #     n += 1
+                #     weights2 = torch.cat([weights2, tw2], dim=0)
+                weights2 = F.sigmoid(self.alphas_betas_reduce)
+
             else:
                 if self.alphas_normal.size(1) == 1:
                     weights = F.softmax(self.alphas_normal_derive, dim=0)
                 else:
                     weights = F.softmax(self.alphas_normal_derive, dim=-1)
-            s0, s1 = s1, cell(s0, s1, weights)
+
+                # n = 3
+                # start = 2
+                # weights2 = F.softmax(self.alphas_betas_normal[0:2], dim=-1)
+                # for i in range(self._steps-1):
+                #     end = start + n
+                #     tw2 = F.softmax(self.alphas_betas_normal[start:end], dim=-1)
+                #     start = end
+                #     n += 1
+                #     weights2 = torch.cat([weights2, tw2], dim=0)
+                weights2 = F.sigmoid(self.alphas_betas_normal)
+
+            s0, s1 = s1, cell(s0, s1, weights, weights2)
         out = self.global_pooling(s1)
         logits = self.classifier(out.view(out.size(0),-1))
         return logits
@@ -181,22 +206,32 @@ class Network(nn.Module):
         self.alphas_normal = self.alphas_normal.cuda()
         # self.alphas_normal = nn.Parameter(torch.FloatTensor(1e-3*np.random.randn(k, num_ops)))
         self.alphas_reduce = nn.Parameter(torch.FloatTensor(0.001*np.ones((k, num_ops))))
-        self.alphas_dependency = nn.ModuleList()
-        self.alphas_normal_source = nn.Parameter(torch.FloatTensor(0.001*np.ones((k, num_ops))))#*op_weights)
 
-        for i in range(self._steps-1):
-            for j in range((i+2)*(self._steps-1-i)):
-                self.alphas_dependency.append(nn.Linear(num_ops, num_ops))
+        alphas_normal_source_tensor = torch.FloatTensor(0.001*np.ones((k, num_ops)))
+        # alphas_normal_source_tensor[0][0] = -1000
+        # alphas_normal_source_tensor[1][0] = -1000
+        self.alphas_normal_source = nn.Parameter(alphas_normal_source_tensor)#*op_weights)
+        
+
+        self.alphas_betas_normal = nn.Parameter(torch.FloatTensor(0.001*np.ones((k))))
+        self.alphas_betas_reduce = nn.Parameter(torch.FloatTensor(0.001*np.ones((k))))
+
+        # self.alphas_dependency = nn.ModuleList()
+        # for i in range(self._steps-1):
+        #     for j in range((i+2)*(self._steps-1-i)):
+        #         self.alphas_dependency.append(nn.Linear(num_ops, num_ops))
 
 
         self._arch_parameters = [
             self.alphas_normal,
             self.alphas_reduce,
+            self.alphas_betas_normal,
+            self.alphas_betas_reduce,
             self.alphas_normal_source,
         ]
 
-        for param in self.alphas_dependency.parameters():
-            self._arch_parameters.append(param)
+        # for param in self.alphas_dependency.parameters():
+        #     self._arch_parameters.append(param)
     
     def arch_parameters(self):
         return self._arch_parameters

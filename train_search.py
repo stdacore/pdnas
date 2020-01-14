@@ -48,6 +48,10 @@ parser.add_argument('--add_layers', action='append', default=['0'], help='add la
 parser.add_argument('--cifar100', action='store_true', default=False, help='search with cifar100 dataset')
 parser.add_argument('--nodes', type=int, default=4, help='num of nodes in a cells')
 parser.add_argument('--gpu', type=str, default='0', help='gpu')
+parser.add_argument('--drop_none', action='store_true', default=False, help='switch off none op')
+parser.add_argument('--drop_skip', action='store_true', default=False, help='switch off skip connect op')
+parser.add_argument('--apply_beta', action='store_true', default=False, help='notImplementedException')
+parser.add_argument('--arch_reg', action='store_true', default=False, help='regularize arch')
 
 args = parser.parse_args()
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -115,15 +119,16 @@ def main():
     switches = []
     for i in range(path_num):
         switches.append([True for j in range(len(PRIMITIVES))])
-
-    # for i in range(path_num):
-    #     switches[i][0]=False # switch off zero operator
+        if args.drop_none:
+            switches[i][0]=False # switch off zero operator
+        if args.drop_skip:
+            switches[i][3]=False # switch off identity operator
     
     switches_normal = copy.deepcopy(switches)
     switches_reduce = copy.deepcopy(switches)
     # To be moved to args
     num_to_keep = [5, 3, 1]
-    num_to_drop = [3, 2, 2]
+    num_to_drop = [2, 2, 2]
     if len(args.add_width) == 3:
         add_width = args.add_width
     else:
@@ -206,12 +211,12 @@ def main():
             if epoch < eps_no_arch:
                 model.module.p = float(drop_rate[sp]) * (epochs - epoch - 1) / epochs
                 model.module.update_p()
-                train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=False)
+                train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=False, train_weight=True)
             elif epoch < epochs:
                 model.module.p = float(drop_rate[sp]) * np.exp(-(epoch - eps_no_arch) * scale_factor) 
                 model.module.update_p()                
-                train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True)
-            else:  
+                train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True, train_weight=True)
+            else: # train arch only
                 train_acc, train_obj = train(train_queue, valid_queue, model, network_params, criterion, optimizer, optimizer_a, lr, train_arch=True, train_weight=False)
 
             logging.info('Train_acc %f', train_acc)
@@ -232,10 +237,27 @@ def main():
             switches_reduce_2 = copy.deepcopy(switches_reduce)
         # drop operations with low architecture weights
         arch_param = model.module.arch_parameters()
-        # print(arch_param[0])
-        logging.info(arch_param[0])
-        normal_prob = F.softmax(arch_param[0], dim=sm_dim).data.cpu().numpy()        
+
+        # n = 3
+        # start = 2
+        # weightsn2 = F.softmax(arch_param[2][0:2], dim=-1)
+        # weightsr2 = F.softmax(arch_param[3][0:2], dim=-1)
+        weightsn2 = F.sigmoid(arch_param[2])
+        weightsr2 = F.sigmoid(arch_param[3])
+        # for i in range(args.nodes-1):
+        #     end = start + n
+        #     tn2 = F.softmax(arch_param[2][start:end], dim=-1)
+        #     tr2 = F.softmax(arch_param[3][start:end], dim=-1)
+        #     start = end
+        #     n += 1
+        #     weightsn2 = torch.cat([weightsn2, tn2],dim=0)
+        #     weightsr2 = torch.cat([weightsr2, tr2],dim=0)
+        weightsn2 = weightsn2.data.cpu().numpy()
+        weightsr2 = weightsr2.data.cpu().numpy()
+
+        normal_prob = F.softmax(arch_param[0], dim=sm_dim).data.cpu().numpy()
         for i in range(path_num):
+            normal_prob[i] = normal_prob[i]*weightsn2[i]
             idxs = []
             for j in range(len(PRIMITIVES)):
                 if switches_normal[i][j]:
@@ -249,6 +271,7 @@ def main():
                 switches_normal[i][idxs[idx]] = False
         reduce_prob = F.softmax(arch_param[1], dim=-1).data.cpu().numpy()
         for i in range(path_num):
+            reduce_prob[i] = reduce_prob[i]*weightsr2[i]
             idxs = []
             for j in range(len(PRIMITIVES)):
                 if switches_reduce[i][j]:
@@ -265,6 +288,24 @@ def main():
         logging_switches(switches_reduce)
         
         if sp == len(num_to_keep) - 1:
+
+            # n = 3
+            # start = 2
+            # weightsn2 = F.softmax(arch_param[2][0:2], dim=-1)
+            # weightsr2 = F.softmax(arch_param[3][0:2], dim=-1)
+            weightsn2 = F.sigmoid(arch_param[2])
+            weightsr2 = F.sigmoid(arch_param[3])
+            # for i in range(args.nodes-1):
+            #     end = start + n
+            #     tn2 = F.softmax(arch_param[2][start:end], dim=-1)
+            #     tr2 = F.softmax(arch_param[3][start:end], dim=-1)
+            #     start = end
+            #     n += 1
+            #     weightsn2 = torch.cat([weightsn2, tn2],dim=0)
+            #     weightsr2 = torch.cat([weightsr2, tr2],dim=0)
+            weightsn2 = weightsn2.data.cpu().numpy()
+            weightsr2 = weightsr2.data.cpu().numpy()
+
             arch_param = model.module.arch_parameters()
             normal_prob = F.softmax(arch_param[0], dim=sm_dim).data.cpu().numpy()
             reduce_prob = F.softmax(arch_param[1], dim=sm_dim).data.cpu().numpy()
@@ -272,9 +313,11 @@ def main():
             reduce_final = [0 for idx in range(path_num)]
             # remove all Zero operations
             for i in range(path_num):
+                normal_prob[i] = normal_prob[i]*weightsn2[i]
                 if switches_normal_2[i][0] == True:
                     normal_prob[i][0] = 0
                 normal_final[i] = max(normal_prob[i])
+                reduce_prob[i] = reduce_prob[i]*weightsr2[i]
                 if switches_reduce_2[i][0] == True:
                     reduce_prob[i][0] = 0
                 reduce_final[i] = max(reduce_prob[i])                
@@ -351,7 +394,9 @@ def train(train_queue, valid_queue, model, network_params, criterion, optimizer,
             loss_a = criterion(logits, target_search)
             loss_a.backward()
             nn.utils.clip_grad_norm_(model.module.arch_parameters(), args.grad_clip)
+            model.module.arch_parameters()[2].grad[0] = 0 # anchoring the scale of first edge
             optimizer_a.step()
+            
 
         if train_weight:
             optimizer.zero_grad()
@@ -363,6 +408,7 @@ def train(train_queue, valid_queue, model, network_params, criterion, optimizer,
             nn.utils.clip_grad_norm_(network_params, args.grad_clip)
             optimizer.step()
             # if train_arch:
+            #     nn.utils.clip_grad_norm_(model.module.arch_parameters(), args.grad_clip)
             #     optimizer_a.step()
 
             prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
@@ -372,13 +418,29 @@ def train(train_queue, valid_queue, model, network_params, criterion, optimizer,
 
             if step % args.report_freq == 0:
                 logging.info('TRAIN Step: %03d Objs: %e R1: %f R5: %f', step, objs.avg, top1.avg, top5.avg)
+
+        
     
     arch_param = model.module.arch_parameters()
     # print(arch_param[0])
-    logging.info("arch_param:")
+    logging.info("alpha:")
     logging.info(arch_param[0])
-    logging.info("softmax_arch_param:")
+    logging.info("softmax_alpha:")
     logging.info(F.softmax(arch_param[0], dim=-1))
+    logging.info("beta:")
+    logging.info(arch_param[2])
+    # n = 3
+    # start = 2
+    # weightsn2 = F.softmax(arch_param[2][0:2], dim=-1)
+    # for i in range(args.nodes-1):
+    #     end = start + n
+    #     tn2 = F.softmax(arch_param[2][start:end], dim=-1)
+    #     start = end
+    #     n += 1
+    #     weightsn2 = torch.cat([weightsn2, tn2],dim=0)
+    weightsn2 = F.sigmoid(arch_param[2])
+    logging.info("normalized_beta:")
+    logging.info(weightsn2)
 
     return top1.avg, objs.avg
 
